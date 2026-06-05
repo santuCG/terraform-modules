@@ -1,145 +1,134 @@
-name: "Terraform"
+name: "Terraform Deployment Flow"
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
   workflow_dispatch:
     inputs:
       run_static_analysis:
-        description: "Run optional static code analysis (TFLint)"
+        description: "Run optional static analysis (TFLint)?"
         required: false
         default: false
         type: boolean
       destroy:
-        description: "Run terraform destroy instead of apply"
+        description: "Destroy infrastructure instead of deploying?"
         required: false
         default: false
         type: boolean
 
+concurrency:
+  group: terraform-deployment
+  cancel-in-progress: false
+
 jobs:
-  checkov_scan:
-    name: "Checkov Scan"
+  security_scan:
+    name: "1. Checkov Security Scan"
     runs-on: ubuntu-latest
-    permissions: read-all
-    env:
-      WORKING_DIRECTORY: infra/aws/terraform/modules/network
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Run Checkov
         uses: bridgecrewio/checkov-action@master
         with:
-          directory: ${{ env.WORKING_DIRECTORY }}
+          directory: infra/aws/terraform/modules/network
+          framework: terraform
+          soft_fail: false
 
   static_analysis:
-    name: "Optional Static Code Analysis"
-    needs: [checkov_scan]
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_static_analysis == 'true' }}
+    name: "2. Optional TFLint"
+    needs: security_scan
+    if: ${{ github.event.inputs.run_static_analysis == 'true' }}
     runs-on: ubuntu-latest
-    permissions: read-all
-    env:
-      WORKING_DIRECTORY: infra/aws/terraform/modules/network
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v1
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v3
         with:
-          terraform_version: 1.3.8
+          tflint_version: latest
 
       - name: Run TFLint
         run: |
-          curl -sSL https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
-          ./tflint --init
-          ./tflint
-        working-directory: ${{ env.WORKING_DIRECTORY }}
+          cd infra/aws/terraform/modules/network
+          tflint --init
+          tflint -f compact
 
   terraform_plan:
-    name: "Terraform Plan"
-    needs: [checkov_scan, static_analysis]
+    name: "3. Terraform Plan"
+    needs: [security_scan, static_analysis]
+    if: |
+      always() &&
+      (needs.security_scan.result == 'success') &&
+      (needs.static_analysis.result == 'success' || needs.static_analysis.result == 'skipped')
     runs-on: ubuntu-latest
-    permissions: read-all
     env:
-      WORKING_DIRECTORY: infra/aws/terraform/modules/network
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v1
+        uses: hashicorp/setup-terraform@v2
         with:
-          terraform_version: 1.3.8
+          terraform_version: 1.5.0
 
-      - name: Terraform Format
-        run: terraform fmt -check
-        working-directory: ${{ env.WORKING_DIRECTORY }}
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        working-directory: infra/aws/terraform/modules/network
 
       - name: Terraform Init
         run: terraform init
-        working-directory: ${{ env.WORKING_DIRECTORY }}
-        env:
-          AWS_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY }}
-          AWS_SECRET_KEY: ${{ secrets.AWS_SECRET_KEY }}
+        working-directory: infra/aws/terraform/modules/network
 
       - name: Terraform Validate
-        run: terraform validate -no-color
-        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: terraform validate
+        working-directory: infra/aws/terraform/modules/network
 
       - name: Terraform Plan
         id: plan
-        run: terraform plan -no-color -input=false
-        working-directory: ${{ env.WORKING_DIRECTORY }}
-        env:
-          AWS_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY }}
-          AWS_SECRET_KEY: ${{ secrets.AWS_SECRET_KEY }}
+        run: terraform plan -input=false -out=tfplan
+        working-directory: infra/aws/terraform/modules/network
 
-  manual_approval:
-    name: "Manual Approval"
-    needs: [terraform_plan]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Await manual approval
-        run: |
-          echo "This job represents a manual approval gate after terraform plan."
-          echo "If you want auto-continue after 15 minutes, configure the 'manual-approval' environment wait timer in repository settings."
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: tfplan
+          path: infra/aws/terraform/modules/network/tfplan
 
-  terraform_deploy:
-    name: "Terraform Deploy"
-    needs: [manual_approval]
+  terraform_apply_destroy:
+    name: "4. Deploy or Destroy"
+    needs: terraform_plan
     runs-on: ubuntu-latest
-    permissions: read-all
     env:
-      WORKING_DIRECTORY: infra/aws/terraform/modules/network
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v1
+        uses: hashicorp/setup-terraform@v2
         with:
-          terraform_version: 1.3.8
+          terraform_version: 1.5.0
 
       - name: Terraform Init
         run: terraform init
-        working-directory: ${{ env.WORKING_DIRECTORY }}
-        env:
-          AWS_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY }}
-          AWS_SECRET_KEY: ${{ secrets.AWS_SECRET_KEY }}
+        working-directory: infra/aws/terraform/modules/network
 
-      - name: Terraform Deploy
-        run: |
-          if [ "${{ github.event.inputs.destroy }}" = 'true' ]; then
-            terraform destroy -auto-approve -input=false
-          else
-            terraform apply -auto-approve -input=false
-          fi
-        working-directory: ${{ env.WORKING_DIRECTORY }}
-        env:
-          AWS_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY }}
-          AWS_SECRET_KEY: ${{ secrets.AWS_SECRET_KEY }}
+      - name: Download Plan Artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: tfplan
+          path: infra/aws/terraform/modules/network
+
+      - name: Terraform Apply
+        if: ${{ github.event.inputs.destroy == 'false' }}
+        run: terraform apply -input=false -auto-approve tfplan
+        working-directory: infra/aws/terraform/modules/network
+
+      - name: Terraform Destroy
+        if: ${{ github.event.inputs.destroy == 'true' }}
+        run: terraform destroy -auto-approve
+        working-directory: infra/aws/terraform/modules/network
  

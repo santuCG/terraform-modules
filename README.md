@@ -19,6 +19,8 @@ This repository demonstrates a professional Terraform-based AWS infrastructure a
 
 ![Terraform automation diagram](docs/terraform-automation-diagram.svg)
 
+[View the automation diagram directly](docs/terraform-automation-diagram.svg)
+
 The deployment workflow follows this flow:
 
 1. **Checkov security scan**: first stage validates Terraform code for policy violations using Checkov

@@ -17,9 +17,7 @@ This repository demonstrates a professional Terraform-based AWS infrastructure a
 
 ## Architecture and Workflow
 
-![Terraform automation diagram](docs/terraform-automation-diagram.svg)
-
-[View the automation diagram directly](docs/terraform-automation-diagram.svg)
+![Terraform automation diagram](https://raw.githubusercontent.com/santuCG/terraform-modules/main/docs/terraform-automation-diagram.svg)
 
 The deployment workflow follows this flow:
 
